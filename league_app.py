@@ -154,7 +154,7 @@ def split_fixtures():
     return pd.DataFrame(unplayed_fixtures, columns=["Player A", "Player B"]), played
 
 # ---------- Streamlit App ----------
-st.title("🏀 Tournament Manager")
+st.title("⚽️ EAFC League Manager")
 
 # Admin login
 st.sidebar.header("Admin Login")
