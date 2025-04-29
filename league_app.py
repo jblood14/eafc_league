@@ -1,14 +1,15 @@
 import streamlit as st
-import sqlite3
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import pandas as pd
 import itertools
 
 # ---------- Config ----------
-DB_FILE = "results.db"
+
 PLAYERS = [
     "James Blood",
     "Tee Osho",
-    "Brenda McKeown",
+    "Brendan McKeown",
     "Kushal Shah",
     "Andreas Oikonomou",
     "Andy Dazzo",
@@ -31,47 +32,97 @@ PLAYERS = [
 ]  
 ADMIN_PASSWORD = "fanduel123"  # <-- Set your admin password here
 
+# ---------- Database Connection ----------
+def get_connection():
+    return psycopg2.connect(
+        host=st.secrets["db_host"],
+        database=st.secrets["db_name"],
+        user=st.secrets["db_user"],
+        password=st.secrets["db_password"],
+        port=st.secrets["db_port"],
+        cursor_factory=RealDictCursor
+    )
+
 # ---------- Database Setup ----------
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            player_a TEXT,
-            player_b TEXT,
-            score_a INTEGER,
-            score_b INTEGER
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS updated_results (
+            id SERIAL PRIMARY KEY,
+            player_a TEXT NOT NULL,
+            player_b TEXT NOT NULL,
+            score_a INTEGER NOT NULL,
+            score_b INTEGER NOT NULL
         )
     ''')
     conn.commit()
+    cur.close()
     conn.close()
 
 # ---------- Submit Result ----------
 def submit_result(player_a, player_b, score_a, score_b):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT COUNT(*) FROM results
-        WHERE (player_a = ? AND player_b = ?) OR (player_a = ? AND player_b = ?)
-    ''', (player_a, player_b, player_b, player_a))
-    match_count = c.fetchone()[0]
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(f'''
+        SELECT COUNT(*) FROM updated_results
+        WHERE (player_a = '{player_a}' AND player_b = '{player_b}') OR (player_a = '{player_a}' AND player_b = '{player_b}')
+    ''')
+    match_count = cur.fetchone()["count"]
     if match_count > 0:
+        cur.close()
         conn.close()
         return False
     else:
-        c.execute('INSERT INTO results (player_a, player_b, score_a, score_b) VALUES (?, ?, ?, ?)',
-                  (player_a, player_b, score_a, score_b))
+        cur.execute(f"INSERT INTO updated_results (player_a, player_b, score_a, score_b) VALUES ('{player_a}', '{player_b}', '{score_a}', '{score_b}')")
         conn.commit()
+        cur.close()
         conn.close()
         return True
-
-# ---------- Generate League Table ----------
-def generate_league_table():
-    conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query('SELECT * FROM results', conn)
+# ---------- Delete Database Table ----------
+def delete_db():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('DROP TABLE IF EXISTS results')
+    conn.commit()
+    cur.close()
     conn.close()
 
+# ---------- Delete All Results ----------
+#conn = get_connection()
+#cur = conn.cursor()
+#
+#cur.execute('SELECT * FROM updated_results;')
+#rows = cur.fetchall()
+#colnames = [desc[0] for desc in cur.description]
+#
+#df = pd.DataFrame(rows, columns=colnames)
+#
+#cur.close()
+#conn.close()
+#
+#st.dataframe(df)
+
+# ---------- Generate League Table ----------
+def fetch_results_table():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM updated_results;')
+    rows = cur.fetchall()
+    colnames = [desc[0] for desc in cur.description]
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=colnames)
+    
+    df = pd.DataFrame(rows, columns=colnames)
+    return df
+
+def generate_league_table():
+    df = fetch_results_table()
+
+    # Build empty League Table first
     table = pd.DataFrame({'Player': PLAYERS})
     table.set_index('Player', inplace=True)
     table['Goals Scored'] = 0
@@ -82,31 +133,36 @@ def generate_league_table():
     table['Losses'] = 0
     table['Matches Played'] = 0
 
-    for _, row in df.iterrows():
-        a, b = row['player_a'], row['player_b']
-        sa, sb = row['score_a'], row['score_b']
+    if not df.empty:
+        for _, row in df.iterrows():
+            a, b = row['player_a'].strip(), row['player_b'].strip()
+            sa, sb = row['score_a'], row['score_b']
 
-        table.at[a, 'Goals Scored'] += sa
-        table.at[a, 'Goals Against'] += sb
-        table.at[b, 'Goals Scored'] += sb
-        table.at[b, 'Goals Against'] += sa
+            if a not in table.index or b not in table.index:
+                st.warning(f"Player not found in table: {a} or {b}")
+                continue
 
-        table.at[a, 'Matches Played'] += 1
-        table.at[b, 'Matches Played'] += 1
+            table.at[a, 'Goals Scored'] += sa
+            table.at[a, 'Goals Against'] += sb
+            table.at[b, 'Goals Scored'] += sb
+            table.at[b, 'Goals Against'] += sa
 
-        if sa > sb:
-            table.at[a, 'Points'] += 3
-            table.at[a, 'Wins'] += 1
-            table.at[b, 'Losses'] += 1
-        elif sa < sb:
-            table.at[b, 'Points'] += 3
-            table.at[b, 'Wins'] += 1
-            table.at[a, 'Losses'] += 1
-        else:
-            table.at[a, 'Points'] += 1
-            table.at[b, 'Points'] += 1
-            table.at[a, 'Draws'] += 1
-            table.at[b, 'Draws'] += 1
+            table.at[a, 'Matches Played'] += 1
+            table.at[b, 'Matches Played'] += 1
+
+            if sa > sb:
+                table.at[a, 'Points'] += 3
+                table.at[a, 'Wins'] += 1
+                table.at[b, 'Losses'] += 1
+            elif sa < sb:
+                table.at[b, 'Points'] += 3
+                table.at[b, 'Wins'] += 1
+                table.at[a, 'Losses'] += 1
+            else:
+                table.at[a, 'Points'] += 1
+                table.at[b, 'Points'] += 1
+                table.at[a, 'Draws'] += 1
+                table.at[b, 'Draws'] += 1
 
     total_matches = len(PLAYERS) - 1
     table['Matches Remaining'] = total_matches - table['Matches Played']
@@ -119,10 +175,11 @@ def generate_league_table():
 
     return table
 
+
 # ---------- Fixtures Management ----------
 def get_unplayed_fixtures():
-    conn = sqlite3.connect(DB_FILE)
-    played = pd.read_sql_query('SELECT player_a, player_b FROM results', conn)
+    conn = get_connection()
+    played = pd.read_sql_query('SELECT player_a, player_b FROM updated_results', conn)
     conn.close()
 
     played_set = set()
@@ -135,26 +192,55 @@ def get_unplayed_fixtures():
     return sorted(list(unplayed))
 
 def split_fixtures():
-    conn = sqlite3.connect(DB_FILE)
-    played = pd.read_sql_query('SELECT player_a, player_b, score_a, score_b FROM results', conn)
+    # Fetch all played matches
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT player_a, player_b, score_a, score_b FROM updated_results;')
+    rows = cur.fetchall()
+    colnames = [desc[0] for desc in cur.description]
+    cur.close()
     conn.close()
 
+    if not rows:
+        played_df = pd.DataFrame(columns=colnames)
+    else:
+        played_df = pd.DataFrame(rows, columns=colnames)
+
+    # Build all possible fixtures
     all_fixtures = pd.DataFrame(itertools.combinations(PLAYERS, 2), columns=["Player A", "Player B"])
 
+    # Find which fixtures have been played
     played_matches = set()
-    for _, row in played.iterrows():
-        played_matches.add(tuple(sorted((row['player_a'], row['player_b']))))
+    for _, row in played_df.iterrows():
+        played_matches.add(tuple(sorted((row['player_a'].strip(), row['player_b'].strip()))))
 
+    # Find unplayed fixtures
     unplayed_fixtures = []
     for _, row in all_fixtures.iterrows():
         match = tuple(sorted((row['Player A'], row['Player B'])))
         if match not in played_matches:
             unplayed_fixtures.append(match)
 
-    return pd.DataFrame(unplayed_fixtures, columns=["Player A", "Player B"]), played
+    unplayed_df = pd.DataFrame(unplayed_fixtures, columns=["Player A", "Player B"])
+
+    return unplayed_df, played_df
+def fetch_completed_results():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute('SELECT player_a, player_b, score_a, score_b FROM updated_results;')
+    rows = cur.fetchall()
+    colnames = [desc[0] for desc in cur.description]
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=colnames)
+    
+    df = pd.DataFrame(rows, columns=colnames)
+    return df
 
 # ---------- Streamlit App ----------
-st.title("⚽️ EAFC League Manager")
+st.title("🏀 Tournament Manager")
 
 # Admin login
 st.sidebar.header("Admin Login")
@@ -168,33 +254,32 @@ with st.expander("📜 Rules"):
     - Each player plays every other player once.
     - 3 points for a win, 1 point for a draw.
     - League ranking: Points > Goal Difference > Goals Scored.
-    - Remember your skill rankings! For every one level you are above your opponent, you get a 0.5 team star rating penalty. For example, if you are a Newcastle rated Player, playing against a Bournemouth rated Player, you will have a 0.5 star rating penalty. If you are a Bournemouth rated Player playing against a Newcastle rated Player, you will must choose a 4.5 star team if your opponent chooses a 5 star team.
-    - Skill levels can change through the season if needed.
-    - Default game settings apply to all matches.
-    - If you are playing a match, please make sure to record the result here.
     """)
 
 # --- Submit Match Result ---
 st.header("Input Match Result")
 unplayed_fixtures = get_unplayed_fixtures()
 
-with st.form("result_form"):
-    if unplayed_fixtures:
-        match = st.selectbox("Select a match to input", [f"{a} vs {b}" for a, b in unplayed_fixtures])
-        selected_a, selected_b = match.split(" vs ")
+# First select the match (OUTSIDE the form)
+if unplayed_fixtures:
+    match = st.selectbox("Select a match to input", [f"{a} vs {b}" for a, b in unplayed_fixtures])
+    selected_a, selected_b = match.split(" vs ")
 
+    # THEN inside the form
+    with st.form("result_form"):
         score_col1, score_col2 = st.columns(2)
-        score_a = score_col1.number_input(f"{selected_a} Score", min_value=0, step=1)
-        score_b = score_col2.number_input(f"{selected_b} Score", min_value=0, step=1)
+        score_a = score_col1.number_input(f"{selected_a} Score", min_value=0, step=1, key="score_a")
+        score_b = score_col2.number_input(f"{selected_b} Score", min_value=0, step=1, key="score_b")
 
-        if st.form_submit_button("Submit Result"):
+        submitted = st.form_submit_button("Submit Result")
+        if submitted:
             success = submit_result(selected_a, selected_b, int(score_a), int(score_b))
             if success:
                 st.success(f"Result submitted: {selected_a} {score_a} - {score_b} {selected_b}")
             else:
                 st.error("⚠️ This match has already been recorded.")
-    else:
-        st.info("🎉 All matches have been played!")
+else:
+    st.info("🎉 All matches have been played!")
 
 st.markdown("---")
 
@@ -228,14 +313,13 @@ with tab2:
         st.download_button("Download Match Results as CSV", data=csv_results, file_name="match_results.csv", mime="text/csv")
     else:
         st.info("No results recorded yet.")
-
 # --- Admin Only ---
 if is_admin:
     st.markdown("---")
     st.header("Admin: Edit or Delete Results")
 
-    conn = sqlite3.connect(DB_FILE)
-    matches = pd.read_sql_query('SELECT id, player_a, player_b, score_a, score_b FROM results', conn)
+    conn = get_connection()
+    matches = pd.read_sql_query('SELECT id, player_a, player_b, score_a, score_b FROM updated_results', conn)
     conn.close()
 
     if matches.empty:
@@ -251,20 +335,21 @@ if is_admin:
         new_score_b = edit_col2.number_input("New Score for Player B", min_value=0, step=1, key="edit_score_b")
 
         if st.button("Update Result"):
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('UPDATE results SET score_a = ?, score_b = ? WHERE id = ?', (int(new_score_a), int(new_score_b), int(match_to_edit_id)))
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute('UPDATE updated_results SET score_a = %s, score_b = %s WHERE id = %s', (int(new_score_a), int(new_score_b), int(match_to_edit_id)))
             conn.commit()
+            cur.close()
             conn.close()
             st.success("Result updated successfully!")
 
         if st.button("Delete Result"):
-            conn = sqlite3.connect(DB_FILE)
-            c = conn.cursor()
-            c.execute('DELETE FROM results WHERE id = ?', (int(match_to_edit_id),))
+            conn = get_connection()
+            cur = conn.cursor()
+            cur.execute('DELETE FROM updated_results WHERE id = %s', (int(match_to_edit_id),))
             conn.commit()
+            cur.close()
             conn.close()
             st.success("Result deleted successfully!")
 else:
     st.info("🔐 Admin login required to edit or delete results.")
-
