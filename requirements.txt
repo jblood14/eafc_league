@@ -1,5 +1,5 @@
 # requirements.txt
-psycopg2-binary==x.x.x
+psycopg2-binary
 sqlalchemy
 pandas
 itertools
