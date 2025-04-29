@@ -1,0 +1,5 @@
+# requirements.txt
+psycopg2-binary==x.x.x
+sqlalchemy
+pandas
+itertools
