@@ -22,7 +22,7 @@ PLAYERS = [
     "Andrew Mannon",
     "Herman Mondesir",
     "Jacob Wallack",
-    "Nano Boakye",
+    "Nana Boakye",
     "Alfie Deller",
     "Ryan Belfer",
     "Carlos Lopez",
